@@ -48,35 +48,39 @@ import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/Ag
  * @notice This contract is based on the MakerDAO DSS system
  */
 contract DSCEngine is ReentrancyGuard {
-    /**
-     * ERRORS
-     */
+    ///////////////////
+    //     Errors    //
+    ///////////////////
     error DSCEngine__NeedMoreThanZero();
     error DSCEngine__TokenAddressesAndPriceFeedAddressesMustBeSameLength();
     error DSCEngine__NotAllowedToken();
     error DSCEngine__TransactionFailed();
+    error DSCEngine__BreaksHealthFactor(uint256 healthFactor);
 
-    /**
-     * STATE VARIABLES
-     */
+    ////////////////////////////
+    //     State Variables    //
+    ////////////////////////////
     uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
     uint256 private constant PRECISION = 1e18;
+    uint256 private constant LIQUIDATION_THRESHOLD = 50; // 200% Collateralization Ratio
+    uint256 private constant LIQUIDATION_PRECISION = 100;
+    uint256 private constant MIN_HEALTH_FACTOR = 1e18;
 
     mapping(address token => address priceFeed) private s_priceFeeds; // tokenToPriceFeed
     mapping(address user => mapping(address token => uint256 amount)) private s_collateralDeposited;
     mapping(address user => uint256 amountDscToMint) private s_DscMinted;
     address[] private s_collateralTokens;
 
-    /**
-     * EVENTS
-     */
+    ////////////////
+    //   Events   //
+    ////////////////
     event CollateralDeposited(address indexed user, address indexed token, uint256 indexed amount);
 
     DecentralizedStableCoin private immutable i_dsc;
 
-    /**
-     * MODIFIER
-     */
+    ///////////////////
+    //   Modifiers   //
+    ///////////////////
     modifier moreThanZero(uint256 amount) {
         if (amount == 0) {
             revert DSCEngine__NeedMoreThanZero();
@@ -91,9 +95,9 @@ contract DSCEngine is ReentrancyGuard {
         _;
     }
 
-    /**
-     * FUNCTIONS
-     */
+    ///////////////////
+    //   Functions   //
+    ///////////////////
     constructor(address[] memory tokenAddresses, address[] memory priceFeedAddresses, address dscAddress) {
         // USD PriceFeeds - ETH/USD, BTC/USD, MATIC/USD etc.
         if (tokenAddresses.length != priceFeedAddresses.length) {
@@ -106,9 +110,9 @@ contract DSCEngine is ReentrancyGuard {
         i_dsc = DecentralizedStableCoin(dscAddress);
     }
 
-    /**
-     * EXTERNAL FUNCTIONS
-     */
+    ///////////////////////////
+    //   External Functions  //
+    ///////////////////////////
     function depositCollateralAndMintDsc() external {}
 
     /**
@@ -141,7 +145,7 @@ contract DSCEngine is ReentrancyGuard {
      */
     function mintDsc(uint256 amountDscToMint) external moreThanZero(amountDscToMint) nonReentrant {
         s_DscMinted[msg.sender] += amountDscToMint;
-        revertIfHealthFactorIsBroken(msg.sender);
+        _revertIfHealthFactorIsBroken(msg.sender);
     }
 
     function burnDsc() external {}
@@ -150,9 +154,9 @@ contract DSCEngine is ReentrancyGuard {
 
     function getHealthFactor() external view {}
 
-    /**
-     * PRIVATE & INTERNAL VIEW FUNCTIONS
-     */
+    ///////////////////////////////////////////
+    //   Private & Internal View Functions   //
+    ///////////////////////////////////////////
     function _getAccountInformation(address user)
         private
         view
@@ -162,22 +166,28 @@ contract DSCEngine is ReentrancyGuard {
         collateralValueInUsd = getAccountCollateralValue(user);
     }
 
-    function _healthFactor(address user) private view returns (uint256) {
-        /**
-         * Returns how close to liquidation the user is
-         * If a user goes below 1, then they can get liquidated
-         */
-        (uint256 totalDscMinted, uint256 collateralValueInUsd) = _getAccountInformation(user);
-    }
-
-    function revertIfHealthFactorIsBroken(address user) internal view {
-        // 1. Check health factor (Do they have enough collateral to mint DSC?)
-        // 2. Revert if they don't have enough collateral
-    }
-
     /**
-     *  PUBLIC & EXTERNAL VIEW FUNCTIONS
+     * Returns how close to liquidation the user is
+     * If a user goes below 1, then they can get liquidated
      */
+    function _healthFactor(address user) private view returns (uint256) {
+        (uint256 totalDscMinted, uint256 collateralValueInUsd) = _getAccountInformation(user);
+        uint256 collateralAdjustedForThreshold = (collateralValueInUsd * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
+        return (collateralAdjustedForThreshold * PRECISION) / totalDscMinted;
+    }
+
+    // 1. Check health factor (Do they have enough collateral to mint DSC?)
+    // 2. Revert if they don't have enough collateral
+    function _revertIfHealthFactorIsBroken(address user) internal view {
+        uint256 userHealthFactor = _healthFactor(user);
+        if (userHealthFactor < MIN_HEALTH_FACTOR) {
+            revert DSCEngine__BreaksHealthFactor(userHealthFactor);
+        }
+    }
+
+    //////////////////////////////////////////
+    //   Public & External View Functions   //
+    //////////////////////////////////////////
     function getAccountCollateralValue(address user) public view returns (uint256 totalCollateralValueInUsd) {
         for (uint256 i = 1; i < s_collateralTokens.length; i++) {
             address token = s_collateralTokens[i];
